@@ -1,0 +1,14 @@
+# RTMP Stream Setup Assistant Dependencies
+# Run: pip install -r requirements.txt
+
+# Rich Console Library - Provides beautiful terminal output
+rich>=13.0.0
+
+# Clipboard Support - Enables copying RTMP URLs to clipboard
+pyperclip>=1.8.0
+
+# System and Process Utilities - Manages system processes and port conflicts
+psutil>=5.9.0
+
+# Tkinter is included with Python standard library
+# No additional GUI dependencies required
