@@ -88,6 +88,17 @@ DEFAULT_CONFIG = {
 DEFAULT_ADB_PATH_WIN = "C:\\platform-tools\\adb.exe"
 DEFAULT_OBS_PATH_WIN = "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe"
 
+# --- Unicode Symbols ---
+SYMBOL_CHECK = "✓"      # U+2713 - Success/completion indicator
+SYMBOL_CROSS = "✗"      # U+2717 - Failure/error indicator
+SYMBOL_WARNING = "⚠"    # U+26A0 - Warning indicator
+SYMBOL_ARROW_LR = "↔"   # U+2194 - Bidirectional arrow (port forwarding)
+SYMBOL_ARROW_R = "→"    # U+2192 - Right arrow
+SYMBOL_ARROW_L = "←"    # U+2190 - Left arrow
+
+# --- UI Constants ---
+DIVIDER_WIDTH = 40      # Total width for step divider titles
+
 
 @dataclass
 class Config:
@@ -439,7 +450,7 @@ def load_config() -> Config:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 parser.write(f)
             console.print(
-                f"[success]✓ Configuration saved/updated in {CONFIG_FILE}.[/success]"
+                f"[success]{SYMBOL_CHECK} Configuration saved/updated in {CONFIG_FILE}.[/success]"
             )
         except IOError as e:
             console.print(f"[danger]Error saving config updates: {e}[/danger]")
@@ -666,7 +677,7 @@ def select_device_from_list(current_config: Config) -> Optional[Dict[str, str]]:
     if len(sel) == 1 and current_config.auto_select_single_device:
         d = sel[0]
         console.print(
-            f"[success]✓ Auto-selecting: [bold]{d['icon']} {d['name']}[/bold]"
+            f"[success]{SYMBOL_CHECK} Auto-selecting: [bold]{d['icon']} {d['name']}[/bold]"
         )
         return d
 
@@ -682,7 +693,7 @@ def select_device_from_list(current_config: Config) -> Optional[Dict[str, str]]:
     try:
         s = Prompt.ask("Enter selection", choices=choices, show_choices=False)
         d = cmap[s]
-        console.print(f"[success]✓ Selected: [bold]{d['icon']} {d['name']}[/bold]")
+        console.print(f"[success]{SYMBOL_CHECK} Selected: [bold]{d['icon']} {d['name']}[/bold]")
         return d
     except KeyboardInterrupt:
         console.print("\n[warning]Cancelled.[/warning]")
@@ -701,7 +712,8 @@ def find_process_using_port(port: int) -> Optional[Tuple[int, str]]:
                     return c.pid, p.name()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-    except:  # pylint: disable=bare-except
+    except (psutil.Error, OSError, AttributeError):
+        # Handle psutil errors, network errors, or attribute access issues
         pass
     return None
 
@@ -742,14 +754,14 @@ def handle_port_conflict(port_str: str, p_config: Config) -> Tuple[bool, Optiona
     if info:
         pid, name = info
         console.print(
-            f"[warning]\u26a0 Port TCP:{port} in use by {name} (PID:{pid}).[/warning]"
+            f"[warning]{SYMBOL_WARNING} Port TCP:{port} in use by {name} (PID:{pid}).[/warning]"
         )
         if p_config.force_kill_port_process or Confirm.ask(
             f"Kill {name} (PID:{pid})?", choices=["y", "n"], default="y"
         ):
             killed = kill_process_by_pid(pid, name)
             if killed:
-                console.print(f"[success]\u2713 Port {port} freed.[/success]")
+                console.print(f"[success]{SYMBOL_CHECK} Port {port} freed.[/success]")
                 # Short delay to allow OS to fully release the port
                 time.sleep(0.5)
             return killed, None if killed else pid
@@ -761,12 +773,13 @@ def handle_port_conflict(port_str: str, p_config: Config) -> Tuple[bool, Optiona
     return True, None
 
 
-def setup_port_forwarding(f_config: Config, d_info: Dict[str, str]) -> bool:
-    if not f_config.adb_path:
+def setup_port_forwarding(config: Config, device_info: Dict[str, str]) -> bool:
+    """Set up ADB reverse port forwarding from device to host."""
+    if not config.adb_path:
         return False
-    did, port = d_info["id"], f_config.rtmp_port
-    console.print(f"[info]Port forwarding (Dev:{port} \u2194 Host:{port})...[/info]")
-    cmd = [str(f_config.adb_path), "-s", did, "reverse", f"tcp:{port}", f"tcp:{port}"]
+    device_id, port = device_info["id"], config.rtmp_port
+    console.print(f"[info]Port forwarding (Dev:{port} {SYMBOL_ARROW_LR} Host:{port})...[/info]")
+    cmd = [str(config.adb_path), "-s", device_id, "reverse", f"tcp:{port}", f"tcp:{port}"]
     try:
         res = subprocess.run(
             cmd, capture_output=True, text=True, timeout=5, check=False
@@ -777,8 +790,8 @@ def setup_port_forwarding(f_config: Config, d_info: Dict[str, str]) -> bool:
     if res.returncode == 0:
         console.print(
             Text.assemble(
-                ("✓ Port Fwd: ", "success"),
-                (f"Dev TCP:{port} \u2194 Host TCP:{port}", "cyan"),
+                (f"{SYMBOL_CHECK} Port Fwd: ", "success"),
+                (f"Dev TCP:{port} {SYMBOL_ARROW_LR} Host TCP:{port}", "cyan"),
             )
         )
         return True
@@ -788,16 +801,17 @@ def setup_port_forwarding(f_config: Config, d_info: Dict[str, str]) -> bool:
     return False
 
 
-def launch_app(a_config: Config, d_info: Dict[str, str]) -> bool:
-    if not a_config.adb_path:
+def launch_app(config: Config, device_info: Dict[str, str]) -> bool:
+    """Launch the streaming app on the Android device."""
+    if not config.adb_path:
         return False
-    did, pkg = d_info["id"], a_config.package_name
+    device_id, pkg = device_info["id"], config.package_name
     if not pkg or "/" not in pkg:
         console.print(f"[danger]Invalid PkgName: {pkg}[/danger]")
         return False
     app_s = pkg.split("/")[0]
     console.print(f"[info]Launching app [highlight]{app_s}[/highlight]...")
-    cmd = [str(a_config.adb_path), "-s", did, "shell", "am", "start", "-n", pkg]
+    cmd = [str(config.adb_path), "-s", device_id, "shell", "am", "start", "-n", pkg]
     try:
         res = subprocess.run(
             cmd, capture_output=True, text=True, timeout=10, check=False
@@ -807,15 +821,15 @@ def launch_app(a_config: Config, d_info: Dict[str, str]) -> bool:
         return False
     out = (res.stdout + res.stderr).lower()
     if res.returncode == 0 and "error" not in out and "exception" not in out:
-        console.print(f"✓ App Launch: Sent cmd for {app_s}.")
+        console.print(f"{SYMBOL_CHECK} App Launch: Sent cmd for {app_s}.")
         time.sleep(0.5)
         return True
     if "permission denial" in out:
-        console.print("[warning]⚠ Permission denied launching app.[/warning]")
+        console.print(f"[warning]{SYMBOL_WARNING} Permission denied launching app.[/warning]")
     elif "not found" in out or "unable to resolve" in out:
-        console.print(f"[warning]⚠ App {app_s} not found.[/warning]")
+        console.print(f"[warning]{SYMBOL_WARNING} App {app_s} not found.[/warning]")
     else:
-        console.print("[warning]⚠ Unknown error launching app.[/warning]")
+        console.print(f"[warning]{SYMBOL_WARNING} Unknown error launching app.[/warning]")
     if res.stdout.strip():
         console.print(f"[dim]Out: {res.stdout.strip()}[/dim]")
     if res.stderr.strip():
@@ -829,7 +843,7 @@ def copy_to_clipboard(c_config: Config):
         pyperclip.copy(url)
         console.print(
             Text.assemble(
-                ("✓ RTMP URL: ", "success"), (url, "rtmp"), (" (Copied)", "dimmed")
+                (f"{SYMBOL_CHECK} RTMP URL: ", "success"), (url, "rtmp"), (" (Copied)", "dimmed")
             )
         )
     except Exception as e:
@@ -865,28 +879,29 @@ def check_monaserver_process() -> bool:
     return False
 
 
-def start_mona_server(m_config: Config) -> Optional[bool]:
+def start_mona_server(config: Config) -> Optional[bool]:
+    """Start the MonaServer RTMP server."""
     if check_monaserver_process():
-        console.print("[success]✓ MonaServer already running.[/success]")
+        console.print(f"[success]{SYMBOL_CHECK} MonaServer already running.[/success]")
         return True
-    if not m_config.monaserver_path or not m_config.monaserver_path.is_file():
+    if not config.monaserver_path or not config.monaserver_path.is_file():
         console.print(
-            f"[danger]MonaServer path ('{m_config.monaserver_path}') is not set or invalid.[/danger]"
+            f"[danger]MonaServer path ('{config.monaserver_path}') is not set or invalid.[/danger]"
         )
         return False
 
     # Port conflict for MonaServer's port should ideally be checked *before* trying to start it.
     # This is done in the main block. If it was resolved by killing,
     # there's a small chance another app took it. Re-checking here is safer.
-    port_clear, conflicting_pid = handle_port_conflict(m_config.rtmp_port, m_config)
+    port_clear, conflicting_pid = handle_port_conflict(config.rtmp_port, config)
     if not port_clear:
         console.print(
-            f"[danger]MonaServer: Port TCP:{m_config.rtmp_port} conflict (PID {conflicting_pid}). Cannot start.[/danger]"
+            f"[danger]MonaServer: Port TCP:{config.rtmp_port} conflict (PID {conflicting_pid}). Cannot start.[/danger]"
         )
         return False
 
     console.print(
-        f"[info]Starting MonaServer: [dimmed]{m_config.monaserver_path}[/dimmed]"
+        f"[info]Starting MonaServer: [dimmed]{config.monaserver_path}[/dimmed]"
     )
     try:
         # Remove creationflags to inherit console/run in background without new window
@@ -894,12 +909,12 @@ def start_mona_server(m_config: Config) -> Optional[bool]:
         # the "Enter" key pressed to exit the script.
         # stdout and stderr are inherited by default, so its output will still appear.
         subprocess.Popen(
-            [str(m_config.monaserver_path)],
-            cwd=str(m_config.monaserver_path.parent),
+            [str(config.monaserver_path)],
+            cwd=str(config.monaserver_path.parent),
             stdin=subprocess.DEVNULL,  # MODIFIED LINE
         )
         console.print(
-            "[success]✓ MonaServer start command issued. Output should appear below (if any).[/success]"
+            f"[success]{SYMBOL_CHECK} MonaServer start command issued. Output should appear below (if any).[/success]"
         )
         time.sleep(
             1.5
@@ -909,20 +924,20 @@ def start_mona_server(m_config: Config) -> Optional[bool]:
         if not check_monaserver_process():
             # Check port again, as MonaServer might have failed to bind
             _, still_conflicting_pid = handle_port_conflict(
-                m_config.rtmp_port, m_config
+                config.rtmp_port, config
             )  # Check if port is now taken by Mona
             if still_conflicting_pid is None and not find_process_using_port(
-                int(m_config.rtmp_port)
+                int(config.rtmp_port)
             ):  # Port is free
                 console.print(
                     "[warning]MonaServer launched, but status check failed and port is not taken. Verify manually.[/warning]"
                 )
             elif (
-                find_process_using_port(int(m_config.rtmp_port))
+                find_process_using_port(int(config.rtmp_port))
                 and not check_monaserver_process()
             ):  # Port taken but not by Mona
                 console.print(
-                    f"[warning]MonaServer launched, but status check failed. Port TCP:{m_config.rtmp_port} might be taken by another process. Verify manually.[/warning]"
+                    f"[warning]MonaServer launched, but status check failed. Port TCP:{config.rtmp_port} might be taken by another process. Verify manually.[/warning]"
                 )
             else:  # Port taken by Mona, but check_monaserver_process failed (should not happen if port is taken by Mona)
                 console.print(
@@ -936,8 +951,12 @@ def start_mona_server(m_config: Config) -> Optional[bool]:
 
 
 def step_divider(emoji: str, title: str):
+    """Print a visual step divider with emoji and title."""
+    left_dashes = 5
+    # Calculate remaining space for right dashes, accounting for emoji and spaces
+    right_dashes = max(0, DIVIDER_WIDTH - len(title) - left_dashes)
     console.print(
-        f"[dim]{'─' * 5}[/dim] {emoji} [bold cyan]{title}[/bold cyan] [dim]{'─' * (35 - len(title))}[/dim]"
+        f"[dim]{'─' * left_dashes}[/dim] {emoji} [bold cyan]{title}[/bold cyan] [dim]{'─' * right_dashes}[/dim]"
     )
 
 
@@ -1078,7 +1097,7 @@ if __name__ == "__main__":
     add_s(
         "Port Forward",
         results["Port Forwarding"],
-        f"Device:{config.rtmp_port} \u2194 Host:{config.rtmp_port}",
+        f"Device:{config.rtmp_port} {SYMBOL_ARROW_LR} Host:{config.rtmp_port}",
     )
     add_s(
         "App Launch",
@@ -1116,26 +1135,26 @@ if __name__ == "__main__":
     console.print(summary)
 
     final_instr = [
-        f"[success]✓ Setup Complete.[/success] RTMP URL: [rtmp]{rtmp_url}[/rtmp]"
+        f"[success]{SYMBOL_CHECK} Setup Complete.[/success] RTMP URL: [rtmp]{rtmp_url}[/rtmp]"
     ]
     if not results["Port Conflict Resolved"] and conflicting_pid_at_start is not None:
         final_instr.append(
-            f"[warning]⚠ Port TCP:{config.rtmp_port} conflict (PID {conflicting_pid_at_start}) may affect MonaServer.[/warning]"
+            f"[warning]{SYMBOL_WARNING} Port TCP:{config.rtmp_port} conflict (PID {conflicting_pid_at_start}) may affect MonaServer.[/warning]"
         )
     if not results["App Launch"]:
         final_instr.append(
-            f"[warning]⚠ App ({config.package_name.split('/', 1)[0]}) launch issue.[/warning]"
+            f"[warning]{SYMBOL_WARNING} App ({config.package_name.split('/', 1)[0]}) launch issue.[/warning]"
         )
 
     if results["MonaServer"] is True:
         final_instr.append(
-            "[success]✓ MonaServer should be running.[/success]\n[info]MonaServer output may appear in this console window.[/info]"
+            f"[success]{SYMBOL_CHECK} MonaServer should be running.[/success]\n[info]MonaServer output may appear in this console window.[/info]"
         )
     elif results["MonaServer"] is False:
-        final_instr.append("[danger]✗ MonaServer failed to start.[/danger]")
+        final_instr.append(f"[danger]{SYMBOL_CROSS} MonaServer failed to start.[/danger]")
     elif results["MonaServer"] is None and config.auto_start_monaserver:
         final_instr.append(
-            "[warning]⚠ MonaServer start was attempted, status unconfirmed. Check console output and port.[/warning]"
+            f"[warning]{SYMBOL_WARNING} MonaServer start was attempted, status unconfirmed. Check console output and port.[/warning]"
         )
     elif results["MonaServer"] is None and not config.auto_start_monaserver:
         final_instr.append(
