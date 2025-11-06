@@ -8,7 +8,6 @@ Reads configuration from config.ini. Checks for host port conflicts.
 
 # Standard library imports
 import configparser
-import os
 import platform
 import re
 import shutil
@@ -96,8 +95,18 @@ SYMBOL_ARROW_LR = "↔"   # U+2194 - Bidirectional arrow (port forwarding)
 SYMBOL_ARROW_R = "→"    # U+2192 - Right arrow
 SYMBOL_ARROW_L = "←"    # U+2190 - Left arrow
 
+# --- Network Constants ---
+DEFAULT_RTMP_PORT = 1935        # Default RTMP streaming port
+MAX_PORT_NUMBER = 65535          # Maximum valid TCP/UDP port number
+RTMP_URL_TEMPLATE = "rtmp://127.0.0.1:{port}/live"  # RTMP URL format
+
+# --- Timing Constants ---
+DELAY_PORT_RELEASE = 0.5        # Seconds to wait after killing port process
+DELAY_APP_LAUNCH = 0.5          # Seconds to wait after launching app
+DELAY_MONASERVER_STARTUP = 1.5  # Seconds to wait for MonaServer to start
+
 # --- UI Constants ---
-DIVIDER_WIDTH = 40      # Total width for step divider titles
+DIVIDER_WIDTH = 40              # Total width for step divider titles
 
 
 @dataclass
@@ -199,13 +208,15 @@ def open_generic_file_dialog(
 
 
 def open_folder_browser(
-    title="Select Folder", initial_dir: Optional[str] = None
+    title: str = "Select Folder", initial_dir: Optional[str] = None
 ) -> Optional[str]:
     return open_generic_file_dialog(title, "folder", initial_dir=initial_dir)
 
 
 def open_file_browser(
-    title="Select File", initial_dir: Optional[str] = None, filetypes=None
+    title: str = "Select File",
+    initial_dir: Optional[str] = None,
+    filetypes: Optional[List[Tuple[str, str]]] = None
 ) -> Optional[str]:
     return open_generic_file_dialog(
         title, "file", initial_dir=initial_dir, filetypes=filetypes
@@ -458,22 +469,6 @@ def load_config() -> Config:
     return app_config
 
 
-def find_adb(config_path_str: Optional[str]) -> Optional[str]:
-    adb_executable_name = "adb.exe" if platform.system() == "Windows" else "adb"
-    if config_path_str:
-        config_path = Path(config_path_str)
-        if (
-            config_path.exists()
-            and config_path.is_file()
-            and "adb" in config_path.name.lower()
-        ):
-            return str(config_path.resolve())
-    adb_from_path = shutil.which(adb_executable_name)
-    if adb_from_path:
-        return adb_from_path
-    return None
-
-
 def check_adb_version(current_config: Config) -> Tuple[bool, str]:
     if not current_config.adb_path:
         return False, "ADB path not set"
@@ -586,37 +581,38 @@ def find_connected_devices(current_config: Config) -> List[Dict[str, str]]:
 
 
 def parse_device_line(
-    p_config: Config, match: re.Match, progress=None, task_id=None
+    config: Config, match: re.Match, progress=None, task_id=None
 ) -> Dict[str, str]:
-    did, stat, det = match.groups()
-    info = {"id": did, "status": stat, "details": det or ""}
-    if "_adb-tls-connect" in did:
-        conn, icon = ("Wi-Fi", "📶")
+    """Parse a single line of ADB device output into a device info dictionary."""
+    device_id, status, details = match.groups()
+    info = {"id": device_id, "status": status, "details": details or ""}
+    if "_adb-tls-connect" in device_id:
+        connection_type, icon = ("Wi-Fi", "📶")
     else:
-        conn, icon = (
+        connection_type, icon = (
             ("Wi-Fi", "📶")
-            if ":" in did and all(c in "0123456789." for c in did.split(":")[0])
-            else (("Emulator", "💻") if "emulator" in did else ("USB", "🔌"))
+            if ":" in device_id and all(c in "0123456789." for c in device_id.split(":")[0])
+            else (("Emulator", "💻") if "emulator" in device_id else ("USB", "🔌"))
         )
-    info.update({"connection": conn, "icon": icon})
-    if stat == "device":
+    info.update({"connection": connection_type, "icon": icon})
+    if status == "device":
         info["name"] = (
-            get_device_model(p_config, did)
-            if p_config.fetch_device_models
+            get_device_model(config, device_id)
+            if config.fetch_device_models
             else "Unknown"
         )
         if progress and task_id:
             progress.update(task_id, advance=1)
     else:
-        info["name"] = f"({stat.capitalize()})"
+        info["name"] = f"({status.capitalize()})"
     return info
 
 
 def select_device_from_list(current_config: Config) -> Optional[Dict[str, str]]:
-    devices, sel = (
-        current_config.devices,
-        [d for d in current_config.devices if d["status"] == "device"],
-    )
+    """Prompt user to select a device from the list of connected devices."""
+    devices = current_config.devices
+    selectable_devices = [d for d in devices if d["status"] == "device"]
+
     if not devices:
         console.print(
             Panel(
@@ -626,7 +622,7 @@ def select_device_from_list(current_config: Config) -> Optional[Dict[str, str]]:
         )
         return None
 
-    tbl = Table(
+    table = Table(
         title="Detected Devices",
         box=ROUNDED,
         border_style="blue",
@@ -640,24 +636,24 @@ def select_device_from_list(current_config: Config) -> Optional[Dict[str, str]]:
         ("Conn.", "green", 7),
         ("ID/IP", "dim", 20),
     ]:
-        tbl.add_column(name, style=style, min_width=width)
-    for i, d in enumerate(devices):
-        is_s = d["status"] == "device"
-        s_style = (
+        table.add_column(name, style=style, min_width=width)
+    for i, device in enumerate(devices):
+        is_selectable = device["status"] == "device"
+        status_style = (
             "success"
-            if is_s
-            else ("warning" if d["status"] == "unauthorized" else "error")
+            if is_selectable
+            else ("warning" if device["status"] == "unauthorized" else "error")
         )
-        tbl.add_row(
-            f"{i + 1}" if is_s else "-",
-            f"{d['icon']} {d['name']}",
-            f"[{s_style}]{d['status'].capitalize()}[/]",
-            d["connection"],
-            d["id"],
+        table.add_row(
+            f"{i + 1}" if is_selectable else "-",
+            f"{device['icon']} {device['name']}",
+            f"[{status_style}]{device['status'].capitalize()}[/]",
+            device["connection"],
+            device["id"],
         )
-    console.print(tbl)
+    console.print(table)
 
-    if not sel:
+    if not selectable_devices:
         msgs = (
             ["[danger]No operational devices.[/danger]"]
             + (
@@ -674,27 +670,26 @@ def select_device_from_list(current_config: Config) -> Optional[Dict[str, str]]:
         console.print(Panel("\n".join(msgs), title="[danger]Selection Error[/danger]"))
         return None
 
-    if len(sel) == 1 and current_config.auto_select_single_device:
-        d = sel[0]
+    if len(selectable_devices) == 1 and current_config.auto_select_single_device:
+        device = selectable_devices[0]
         console.print(
-            f"[success]{SYMBOL_CHECK} Auto-selecting: [bold]{d['icon']} {d['name']}[/bold]"
+            f"[success]{SYMBOL_CHECK} Auto-selecting: [bold]{device['icon']} {device['name']}[/bold]"
         )
-        return d
+        return device
 
     console.print("[info]Multiple devices. Select one:[/info]")
-    choices, cmap = (
-        [str(i + 1) for i in range(len(sel))],
-        {str(i + 1): dev for i, dev in enumerate(sel)},
-    )
-    for i, d in enumerate(sel):
+    choices = [str(i + 1) for i in range(len(selectable_devices))]
+    choice_map = {str(i + 1): device for i, device in enumerate(selectable_devices)}
+
+    for i, device in enumerate(selectable_devices):
         console.print(
-            f" [highlight][{i + 1}] [/]{d['icon']} {d['name']} ({d['connection']}) [dim]{d['id']}[/]"
+            f" [highlight][{i + 1}] [/]{device['icon']} {device['name']} ({device['connection']}) [dim]{device['id']}[/]"
         )
     try:
-        s = Prompt.ask("Enter selection", choices=choices, show_choices=False)
-        d = cmap[s]
-        console.print(f"[success]{SYMBOL_CHECK} Selected: [bold]{d['icon']} {d['name']}[/bold]")
-        return d
+        selection = Prompt.ask("Enter selection", choices=choices, show_choices=False)
+        device = choice_map[selection]
+        console.print(f"[success]{SYMBOL_CHECK} Selected: [bold]{device['icon']} {device['name']}[/bold]")
+        return device
     except KeyboardInterrupt:
         console.print("\n[warning]Cancelled.[/warning]")
         sys.exit(0)
@@ -702,7 +697,8 @@ def select_device_from_list(current_config: Config) -> Optional[Dict[str, str]]:
 
 
 def find_process_using_port(port: int) -> Optional[Tuple[int, str]]:
-    if not 0 < port <= 65535:
+    """Find the process using a specific port."""
+    if not 0 < port <= MAX_PORT_NUMBER:
         return None
     try:
         for c in psutil.net_connections(kind="inet"):
@@ -742,13 +738,14 @@ def kill_process_by_pid(pid: int, name: str = "process") -> bool:
         return False
 
 
-def handle_port_conflict(port_str: str, p_config: Config) -> Tuple[bool, Optional[int]]:
+def handle_port_conflict(port_str: str, config: Config) -> Tuple[bool, Optional[int]]:
+    """Handle port conflicts by optionally killing conflicting processes."""
     try:
         port = int(port_str)
-        assert 0 < port <= 65535
+        assert 0 < port <= MAX_PORT_NUMBER
     except (ValueError, AssertionError):
-        console.print(f"[danger]Invalid port: {port_str}. Using 1935.[/danger]")
-        port = 1935
+        console.print(f"[danger]Invalid port: {port_str}. Using {DEFAULT_RTMP_PORT}.[/danger]")
+        port = DEFAULT_RTMP_PORT
     console.print(f"[info]Checking port TCP:{port}...[/info]")
     info = find_process_using_port(port)
     if info:
@@ -756,14 +753,14 @@ def handle_port_conflict(port_str: str, p_config: Config) -> Tuple[bool, Optiona
         console.print(
             f"[warning]{SYMBOL_WARNING} Port TCP:{port} in use by {name} (PID:{pid}).[/warning]"
         )
-        if p_config.force_kill_port_process or Confirm.ask(
+        if config.force_kill_port_process or Confirm.ask(
             f"Kill {name} (PID:{pid})?", choices=["y", "n"], default="y"
         ):
             killed = kill_process_by_pid(pid, name)
             if killed:
                 console.print(f"[success]{SYMBOL_CHECK} Port {port} freed.[/success]")
                 # Short delay to allow OS to fully release the port
-                time.sleep(0.5)
+                time.sleep(DELAY_PORT_RELEASE)
             return killed, None if killed else pid
         elif Confirm.ask("Skip port conflict?", choices=["y", "n"], default="n"):
             console.print("[warning]Skipping. Streaming may fail.[/warning]")
@@ -822,7 +819,7 @@ def launch_app(config: Config, device_info: Dict[str, str]) -> bool:
     out = (res.stdout + res.stderr).lower()
     if res.returncode == 0 and "error" not in out and "exception" not in out:
         console.print(f"{SYMBOL_CHECK} App Launch: Sent cmd for {app_s}.")
-        time.sleep(0.5)
+        time.sleep(DELAY_APP_LAUNCH)
         return True
     if "permission denial" in out:
         console.print(f"[warning]{SYMBOL_WARNING} Permission denied launching app.[/warning]")
@@ -837,8 +834,9 @@ def launch_app(config: Config, device_info: Dict[str, str]) -> bool:
     return False
 
 
-def copy_to_clipboard(c_config: Config):
-    url = f"rtmp://127.0.0.1:{c_config.rtmp_port}/live"
+def copy_to_clipboard(config: Config) -> None:
+    """Copy the RTMP URL to the system clipboard."""
+    url = RTMP_URL_TEMPLATE.format(port=config.rtmp_port)
     try:
         pyperclip.copy(url)
         console.print(
@@ -916,9 +914,7 @@ def start_mona_server(config: Config) -> Optional[bool]:
         console.print(
             f"[success]{SYMBOL_CHECK} MonaServer start command issued. Output should appear below (if any).[/success]"
         )
-        time.sleep(
-            1.5
-        )  # Give MonaServer time to start and potentially print initial logs
+        time.sleep(DELAY_MONASERVER_STARTUP)  # Give MonaServer time to start
 
         # Verify if the process actually started and is running
         if not check_monaserver_process():
@@ -950,7 +946,7 @@ def start_mona_server(config: Config) -> Optional[bool]:
         return False
 
 
-def step_divider(emoji: str, title: str):
+def step_divider(emoji: str, title: str) -> None:
     """Print a visual step divider with emoji and title."""
     left_dashes = 5
     # Calculate remaining space for right dashes, accounting for emoji and spaces
@@ -1105,7 +1101,7 @@ if __name__ == "__main__":
         f"[dim]{config.package_name.split('/', 1)[0]}[/dim]",
         fail="FAIL/Skip",
     )
-    rtmp_url = f"rtmp://127.0.0.1:{config.rtmp_port}/live"
+    rtmp_url = RTMP_URL_TEMPLATE.format(port=config.rtmp_port)
     add_s(
         "RTMP URL",
         results["RTMP URL Copied"],
